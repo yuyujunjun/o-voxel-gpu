@@ -5,14 +5,14 @@ from .. import _C
 
 __all__ = [
     "mesh_to_flexible_dual_grid",
+    "mesh_to_flexible_dual_grid_cuda",
     "flexible_dual_grid_to_mesh",
 ]
 
 
 def _init_hashmap(grid_size, capacity, device):
     VOL = (grid_size[0] * grid_size[1] * grid_size[2]).item()
-        
-    # If the number of elements in the tensor is less than 2^32, use uint32 as the hashmap type, otherwise use uint64.
+
     if VOL < 2**32:
         hashmap_keys = torch.full((capacity,), torch.iinfo(torch.uint32).max, dtype=torch.uint32, device=device)
     elif VOL < 2**64:
@@ -21,50 +21,15 @@ def _init_hashmap(grid_size, capacity, device):
         raise ValueError(f"The spatial size is too large to fit in a hashmap. Get volumn {VOL} > 2^64.")
 
     hashmap_vals = torch.empty((capacity,), dtype=torch.uint32, device=device)
-    
+
     return hashmap_keys, hashmap_vals
 
 
-@torch.no_grad()
-def mesh_to_flexible_dual_grid(
-    vertices: torch.Tensor,
-    faces: torch.Tensor,
-    voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor] = None,
-    grid_size: Union[int, list, tuple, np.ndarray, torch.Tensor] = None,
-    aabb: Union[list, tuple, np.ndarray, torch.Tensor] = None,
-    face_weight: float = 1.0,
-    boundary_weight: float = 1.0,
-    regularization_weight: float = 0.1,
-    timing: bool = False,
-) -> Union[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Voxelize a mesh into a sparse voxel grid.
-    
-    Args:
-        vertices (torch.Tensor): The vertices of the mesh.
-        faces (torch.Tensor): The faces of the mesh.
-        voxel_size (float, list, tuple, np.ndarray, torch.Tensor): The size of each voxel.
-        grid_size (int, list, tuple, np.ndarray, torch.Tensor): The size of the grid.
-            NOTE: One of voxel_size and grid_size must be provided.
-        aabb (list, tuple, np.ndarray, torch.Tensor): The axis-aligned bounding box of the mesh.
-            If not provided, it will be computed automatically.
-        face_weight (float): The weight of the face term in the QEF when solving the dual vertices.
-        boundary_weight (float): The weight of the boundary term in the QEF when solving the dual vertices.
-        regularization_weight (float): The weight of the regularization term in the QEF when solving the dual vertices.
-        timing (bool): Whether to time the voxelization process.
-        
-    Returns:
-        torch.Tensor: The indices of the voxels that are occupied by the mesh.
-            The shape of the tensor is (N, 3), where N is the number of occupied voxels.
-        torch.Tensor: The dual vertices of the mesh.
-        torch.Tensor: The intersected flag of each voxel.
-    """
-    
-    # Load mesh
+def _process_mesh_to_fdg_args(vertices, faces, voxel_size, grid_size, aabb):
+    """Validate and normalize arguments for mesh_to_flexible_dual_grid variants."""
     vertices = vertices.float()
     faces = faces.int()
 
-    # Voxelize settings
     assert voxel_size is not None or grid_size is not None, "Either voxel_size or grid_size must be provided"
 
     if voxel_size is not None:
@@ -93,17 +58,16 @@ def mesh_to_flexible_dual_grid(
         if isinstance(aabb, (list, tuple)):
             aabb = np.array(aabb)
         if isinstance(aabb, np.ndarray):
-            aabb = torch.tensor(aabb, dtype=torch.float32)
+            aabb = torch.tensor(aabb, dtype=torch.float32, device=vertices.device)
         assert isinstance(aabb, torch.Tensor), f"aabb must be a list, tuple, np.ndarray, or torch.Tensor, but got {type(aabb)}"
         assert aabb.dim() == 2, f"aabb must be a 2D tensor, but got {aabb.shape}"
         assert aabb.size(0) == 2, f"aabb must have 2 rows, but got {aabb.size(0)}"
         assert aabb.size(1) == 3, f"aabb must have 3 columns, but got {aabb.size(1)}"
 
-    # Auto adjust aabb
     if aabb is None:
         min_xyz = vertices.min(dim=0).values
         max_xyz = vertices.max(dim=0).values
-        
+
         if voxel_size is not None:
             padding = torch.ceil((max_xyz - min_xyz) / voxel_size) * voxel_size - (max_xyz - min_xyz)
             min_xyz -= padding * 0.5
@@ -115,40 +79,84 @@ def mesh_to_flexible_dual_grid(
 
         aabb = torch.stack([min_xyz, max_xyz], dim=0).float().to(vertices.device)
 
-    # Fill voxel size or grid size
     if voxel_size is None:
         voxel_size = (aabb[1] - aabb[0]) / grid_size
     if grid_size is None:
         grid_size = ((aabb[1] - aabb[0]) / voxel_size).round().int()
-        
-    # subdivide mesh
+
     vertices = vertices - aabb[0].reshape(1, 3)
     grid_range = torch.stack([torch.zeros_like(grid_size), grid_size], dim=0).int()
-    
-    if vertices.is_cuda:
-        ret = _C.mesh_to_flexible_dual_grid_cuda(
-            vertices,
-            faces,
-            voxel_size,
-            grid_range,
-            face_weight,
-            boundary_weight,
-            regularization_weight,
-            timing,
-        )
-    else:
-        ret = _C.mesh_to_flexible_dual_grid_cpu(
-            vertices,
-            faces,
-            voxel_size,
-            grid_range,
-            face_weight,
-            boundary_weight,
-            regularization_weight,
-            timing,
-        )
-    
-    return ret
+
+    return vertices, faces, voxel_size, grid_range
+
+
+@torch.no_grad()
+def mesh_to_flexible_dual_grid_cuda(
+    vertices: torch.Tensor,
+    faces: torch.Tensor,
+    voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor] = None,
+    grid_size: Union[int, list, tuple, np.ndarray, torch.Tensor] = None,
+    aabb: Union[list, tuple, np.ndarray, torch.Tensor] = None,
+    face_weight: float = 1.0,
+    boundary_weight: float = 1.0,
+    regularization_weight: float = 0.1,
+    timing: bool = False,
+) -> Union[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Voxelize a mesh into a sparse voxel grid using the CUDA (GPU) path.
+
+    Tensors must be on a CUDA device. See mesh_to_flexible_dual_grid for
+    argument descriptions.
+    """
+    assert vertices.is_cuda, "mesh_to_flexible_dual_grid_cuda requires CUDA tensors"
+    vertices, faces, voxel_size, grid_range = _process_mesh_to_fdg_args(
+        vertices, faces, voxel_size, grid_size, aabb)
+    return _C.mesh_to_flexible_dual_grid_cuda(
+        vertices, faces, voxel_size, grid_range,
+        face_weight, boundary_weight, regularization_weight, timing,
+    )
+
+
+@torch.no_grad()
+def mesh_to_flexible_dual_grid(
+    vertices: torch.Tensor,
+    faces: torch.Tensor,
+    voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor] = None,
+    grid_size: Union[int, list, tuple, np.ndarray, torch.Tensor] = None,
+    aabb: Union[list, tuple, np.ndarray, torch.Tensor] = None,
+    face_weight: float = 1.0,
+    boundary_weight: float = 1.0,
+    regularization_weight: float = 0.1,
+    timing: bool = False,
+) -> Union[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Voxelize a mesh into a sparse voxel grid using the CPU path.
+
+    Args:
+        vertices (torch.Tensor): The vertices of the mesh.
+        faces (torch.Tensor): The faces of the mesh.
+        voxel_size (float, list, tuple, np.ndarray, torch.Tensor): The size of each voxel.
+        grid_size (int, list, tuple, np.ndarray, torch.Tensor): The size of the grid.
+            NOTE: One of voxel_size and grid_size must be provided.
+        aabb (list, tuple, np.ndarray, torch.Tensor): The axis-aligned bounding box of the mesh.
+            If not provided, it will be computed automatically.
+        face_weight (float): The weight of the face term in the QEF when solving the dual vertices.
+        boundary_weight (float): The weight of the boundary term in the QEF when solving the dual vertices.
+        regularization_weight (float): The weight of the regularization term in the QEF when solving the dual vertices.
+        timing (bool): Whether to time the voxelization process.
+
+    Returns:
+        torch.Tensor: The indices of the voxels that are occupied by the mesh.
+            The shape of the tensor is (N, 3), where N is the number of occupied voxels.
+        torch.Tensor: The dual vertices of the mesh.
+        torch.Tensor: The intersected flag of each voxel.
+    """
+    vertices, faces, voxel_size, grid_range = _process_mesh_to_fdg_args(
+        vertices, faces, voxel_size, grid_size, aabb)
+    return _C.mesh_to_flexible_dual_grid_cpu(
+        vertices, faces, voxel_size, grid_range,
+        face_weight, boundary_weight, regularization_weight, timing,
+    )
 
 
 def flexible_dual_grid_to_mesh(

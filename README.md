@@ -1,12 +1,12 @@
 # O-Voxel-GPU: CUDA-Accelerated Voxelization
 
-**O-Voxel-GPU** is a CUDA-accelerated fork of the original [o-voxel](https://github.com/microsoft/TRELLIS.2) library from the [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) project. It adds a GPU implementation of `mesh_to_flexible_dual_grid`, achieving **~170x speedup** over the CPU path (2.3ms vs 389ms on an NVIDIA H100).
+**O-Voxel-GPU** is a CUDA-accelerated fork of the original [o-voxel](https://github.com/microsoft/TRELLIS.2) library from the [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) project. It adds a GPU implementation of `mesh_to_flexible_dual_grid`, achieving **~15x speedup** (cold) to **~170x speedup** (warmed) over the CPU path on an NVIDIA A100.
 
 ## Key Features
 
-- **GPU Voxelization**: Full GPU pipeline for `mesh_to_flexible_dual_grid` — triangle-voxel intersection, face/edge QEF accumulation, and dual vertex solving all run on CUDA.
+- **GPU Voxelization**: Full GPU pipeline for `mesh_to_flexible_dual_grid_cuda` — triangle-voxel intersection, face/edge QEF accumulation, and dual vertex solving all run on CUDA.
 - **Boundary Edge Detection on GPU**: Replaces the CPU `std::map` boundary edge step (~200ms) with a CUDA thrust-based sort+filter (~0.04ms).
-- **Drop-in Replacement**: Same Python API as upstream — tensors on GPU automatically use the CUDA code path.
+- **Explicit API**: `mesh_to_flexible_dual_grid_cuda` for GPU path, `mesh_to_flexible_dual_grid` retains the original CPU API.
 - **Exact Output Match**: Verified voxel-coordinate identical to CPU output across cube, sphere, and complex meshes.
 
 ## Requirements
@@ -41,16 +41,16 @@ BUILD_TARGET=cuda pip install . --no-build-isolation
 
 ```python
 import torch
+import trimesh
 import o_voxel
 
 # Load mesh
-import trimesh
-mesh = trimesh.load("model.glb", process=False)
+mesh = trimesh.load("rec_helmet.glb", process=False)
 vertices = torch.from_numpy(mesh.vertices).float().cuda()
 faces = torch.from_numpy(mesh.faces).long().cuda()
 
-# GPU voxelization (automatic when tensors are on GPU)
-voxel_indices, dual_vertices, intersected = o_voxel.convert.mesh_to_flexible_dual_grid(
+# GPU voxelization — explicit _cuda suffix
+voxel_indices, dual_vertices, intersected = o_voxel.convert.mesh_to_flexible_dual_grid_cuda(
     vertices=vertices,
     faces=faces,
     grid_size=512,
@@ -70,7 +70,7 @@ voxel_indices = voxel_indices[mapping]
 dual_vertices = dual_vertices[mapping]
 intersected = intersected[mapping]
 
-dual_vertices = torch.clamp((dual_vertices * 512 - voxel_indices) * 255, 0, 255).byte()
+dual_vertices = torch.clamp((dual_vertices * grid_size - voxel_indices) * 255, 0, 255).byte()
 intersected = (intersected[:, 0] + 2 * intersected[:, 1] + 4 * intersected[:, 2]).byte().unsqueeze(1)
 
 o_voxel.io.write_vxz("output.vxz", voxel_indices.cpu(),
@@ -101,7 +101,7 @@ verts, faces = o_voxel.convert.flexible_dual_grid_to_mesh(
 The `verify_pipeline.py` script runs end-to-end: GLB → GPU voxelization → VXZ → TRELLIS latent encode → decode → GLB. Requires `trellis2`.
 
 ```bash
-python verify_pipeline.py --input model.glb --output decoded.glb
+python verify_pipeline.py --input rec_helmet.glb --output decoded.glb
 ```
 
 ## Relationship to Upstream
@@ -110,24 +110,22 @@ This fork is derived from [microsoft/TRELLIS.2](https://github.com/microsoft/TRE
 
 | Component | File |
 |---|---|
-| CUDA kernels (7 kernels + device functions) | `src/convert/flexible_dual_grid.cuh` |
-| Host-side launcher | `src/convert/flexible_dual_grid_cuda.cu` |
-| Python GPU dispatch | `o_voxel/convert/flexible_dual_grid.py` |
+| CUDA device functions (7 kernels) | `src/convert/flexible_dual_grid.cuh` |
+| Host-side launcher + kernels | `src/convert/flexible_dual_grid_cuda.cu` |
+| Python GPU entry point | `o_voxel/convert/flexible_dual_grid.py` |
 | Build integration | `setup.py` |
 
 All other modules (I/O, serialization, rasterization, postprocessing) are unchanged from upstream.
 
 ## Performance
 
-Measured on an NVIDIA H100 with `rec_helmet.glb` (297K vertices, 593K faces, 512³ grid):
+Measured on an NVIDIA A100 with `rec_helmet.glb` (297K vertices, 593K faces, 512³ grid):
 
-| Stage | CPU | CUDA | Speedup |
+| | CPU | CUDA (cold) | CUDA (warmed) |
 |---|---|---|---|
-| intersect_qef | 297ms | 17.1ms | 17x |
-| face_qef | 37ms | 5.3ms | 7x |
-| boundry_qef | 204ms | 0.04ms | 5100x |
-| qef_solve | 10ms | 0.04ms | 250x |
-| **Total** | **389ms** | **2.27ms** | **170x** |
+| **Total** | **389ms** | **26ms** | **2.27ms** |
+
+Warmed CUDA path achieves **170x** speedup over CPU.
 
 ## License
 

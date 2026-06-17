@@ -52,7 +52,7 @@ def voxelize_and_save_vxz(vertices, faces, grid_size, vxz_path):
     """Run GPU voxelization and save VXZ file."""
     t0 = time.perf_counter()
     aabb = torch.tensor([[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]], dtype=torch.float32, device=vertices.device)
-    voxel_indices, dual_vertices, intersected = o_voxel.convert.mesh_to_flexible_dual_grid(
+    voxel_indices, dual_vertices, intersected = o_voxel.convert.mesh_to_flexible_dual_grid_cuda(
         vertices=vertices,
         faces=faces,
         grid_size=grid_size,
