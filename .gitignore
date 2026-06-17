@@ -1,0 +1,15 @@
+build/
+__pycache__/
+*.pyc
+*.pyo
+*.so
+*.egg-info/
+dist/
+*.vxz
+*.glb
+*.npz
+.DS_Store
+.omc/
+.vscode/
+*.swp
+*.swo
