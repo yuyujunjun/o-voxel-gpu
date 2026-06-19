@@ -8,6 +8,7 @@
 - **Boundary Edge Detection on GPU**: Replaces the CPU `std::map` boundary edge step (~200ms) with a CUDA thrust-based sort+filter (~0.04ms).
 - **Explicit API**: `mesh_to_flexible_dual_grid_cuda` for GPU path, `mesh_to_flexible_dual_grid` retains the original CPU API.
 - **Exact Output Match**: Verified voxel-coordinate identical to CPU output across cube, sphere, and complex meshes.
+- **Mesh Pre-Subdivision**: `subdivide_mesh_gpu` eliminates warp divergence from large triangles, yielding ~10x additional speedup at 512³.
 
 ## Requirements
 
@@ -61,6 +62,29 @@ voxel_indices, dual_vertices, intersected = o_voxel.convert.mesh_to_flexible_dua
 )
 ```
 
+### Pre-Subdivision for Large Triangles
+
+The triangle-parallel scanline algorithm processes one triangle per CUDA thread. Large triangles dominate runtime through **warp divergence** — a single thread traverses hundreds of voxels while the rest of the warp idles. The voxel-parallel alternative wastes ~92% of threads on empty voxels.
+
+`subdivide_mesh_gpu` solves this by splitting large triangles **before** voxelization via longest-edge bisection:
+
+```python
+from o_voxel.convert.mesh_subdivide import subdivide_mesh_gpu
+
+# Subdivide triangles larger than 2e-5 (optimal for 512^3 grid)
+vertices, faces = subdivide_mesh_gpu(vertices, faces, area_threshold=2e-5)
+
+# Then voxelize as usual — ~10x faster at 512^3, ~15x at 1024^3
+voxel_indices, dual_vertices, intersected = o_voxel.convert.mesh_to_flexible_dual_grid_cuda(
+    vertices=vertices, faces=faces, grid_size=512, ...
+)
+```
+
+Key design decisions:
+- **External to the pipeline**: callers can subdivide once and voxelize many times (e.g. animated meshes).
+- **Default threshold `2e-5`**: balances subdivision overhead against voxelization speedup for 512^3 grids. Use `5e-6` for 1024^3.
+- **Threshold formula**: `area_threshold ≈ 5 / grid_size²` for a target grid resolution.
+
 ### Save VXZ
 
 ```python
@@ -113,6 +137,7 @@ This fork is derived from [microsoft/TRELLIS.2](https://github.com/microsoft/TRE
 | CUDA device functions (7 kernels) | `src/convert/flexible_dual_grid.cuh` |
 | Host-side launcher + kernels | `src/convert/flexible_dual_grid_cuda.cu` |
 | Python GPU entry point | `o_voxel/convert/flexible_dual_grid.py` |
+| Mesh pre-subdivision | `o_voxel/convert/mesh_subdivide.py` |
 | Build integration | `setup.py` |
 
 All other modules (I/O, serialization, rasterization, postprocessing) are unchanged from upstream.
@@ -124,6 +149,12 @@ Measured on an NVIDIA A100 with `rec_helmet.glb` (297K vertices, 593K faces, 512
 | | CPU | CUDA (cold) | CUDA (warmed) |
 |---|---|---|---|
 | **Total** | **389ms** | **26ms** | **2.27ms** |
+
+With pre-subdivision at 512³:
+
+| | No subdivide | With subdivide (2e-5) | Speedup |
+|---|---|---|---|
+| **Voxelization** | 78.8ms | 7.7ms | **10.3x** |
 
 Warmed CUDA path achieves **170x** speedup over CPU.
 
