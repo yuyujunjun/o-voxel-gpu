@@ -140,7 +140,7 @@ Meshes with large faces expose warp divergence in the triangle-parallel scanline
 | Voxel-parallel blockface | 78.8ms |
 | Triangle-parallel + pre-subdivision | **7.7ms** |
 
-**Why voxel-parallel was abandoned.** The blockface achieved 78.8ms with both intersect and face-QEF running voxel-parallel (70ms + 5ms respectively). But even fully voxel-parallel, large triangles force redundant per-voxel intersection tests. Pre-subdivision eliminates large triangles at the source, making the simpler triangle-parallel approach an order of magnitude faster without additional complexity.
+**Why voxel-parallel was abandoned.** The blockface launched one thread per voxel — 134M at 512³. While ~92% of those voxels are empty and bail out immediately, the few that do intersect a mesh triangle may need to test against every triangle in their 8³ block. The 8³ granularity is too coarse to isolate triangle-voxel pairs efficiently: finer blocks mean more blocks (more overhead), coarser blocks mean larger triangle lists per block. Pre-subdivision eliminates large triangles at the source, and at 7.7ms there was no reason to keep tuning the voxel-parallel approach.
 
 ## Appendix: Voxel-Parallel Approach (Explored)
 
@@ -158,7 +158,7 @@ We experimented with a fully **voxel-parallel** alternative to the triangle-para
 
 ### Result
 
-The voxel-parallel pipeline achieves 78.8ms (70ms intersect + 5ms face-QEF), a solid improvement over the raw triangle-parallel 236ms. However, large triangles still force redundant per-voxel intersection tests: a single large triangle overlaps many blocks, causing each overlapping voxel to re-test it. Pre-subdivision eliminates the root cause rather than working around it, yielding 7.7ms with a simpler implementation.
+The voxel-parallel pipeline achieves 78.8ms (70ms intersect + 5ms face-QEF), a solid improvement over raw triangle-parallel 236ms. However, the intersect step suffers from the sheer number of voxel threads (134M at 512³, mostly empty) combined with the 8³ block granularity: too coarse to narrow triangle-voxel pairs, too fine to avoid massive thread-launch overhead. A finer granularity (e.g. 16³) would reduce block count but inflate per-block triangle lists, and vice versa. Given that pre-subdivision already delivers 7.7ms with a simpler implementation, further tuning the voxel-parallel approach was not justified.
 
 ## Files Added vs Upstream
 
