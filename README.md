@@ -142,6 +142,22 @@ Meshes with large faces expose warp divergence in the triangle-parallel scanline
 
 **Why voxel-parallel was abandoned.** The blockface approach accelerates face-QEF by processing voxels in parallel, but the initial triangle-voxel intersection step is still triangle-parallel scanline — the same warp-divergence bottleneck from large triangles. Pre-subdivision eliminates the root cause rather than working around it, making the simpler triangle-parallel approach faster by an order of magnitude.
 
+## Appendix: Voxel-Parallel Approach (Explored)
+
+We experimented with a **voxel-parallel** alternative to the triangle-parallel scanline. The idea: instead of one thread per triangle, assign one thread per voxel (or per block of 8³ voxels) for the face-QEF accumulation step.
+
+### Design
+
+1. **Block construction.** The grid is partitioned into 8³-voxel blocks. Each block accumulates a list of triangles whose bounding boxes intersect the block, using a CUDA hash table indexed by block ID.
+
+2. **Per-voxel face-QEF.** One thread per voxel iterates over the block's triangle list, tests overlap between the voxel's AABB and each triangle's plane, and atomically accumulates the QEF matrix.
+
+3. **Intersect stays triangle-parallel.** The initial intersection step (discovering which voxels are occupied) remains triangle-parallel scanline — the same algorithm as the standard path.
+
+### Result
+
+Voxel-parallel face-QEF is efficient at what it does: O(voxels × local triangles). But the overall pipeline is bottlenecked by the intersect step, which for large triangles still takes ~200ms of the 236ms total. The 78.8ms result confirms that face-QEF was never the dominant cost. Pre-subdivision fixes the actual bottleneck directly.
+
 ## Files Added vs Upstream
 
 | Component | File |
