@@ -101,19 +101,25 @@ def mesh_to_flexible_dual_grid_cuda(
     boundary_weight: float = 1.0,
     regularization_weight: float = 0.1,
     timing: bool = False,
+    return_voxel_only: bool = False,
 ) -> Union[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Voxelize a mesh into a sparse voxel grid using the CUDA (GPU) path.
 
     Tensors must be on a CUDA device. See mesh_to_flexible_dual_grid for
     argument descriptions.
+
+    Args:
+        return_voxel_only: If True, return only voxel indices from the
+            intersect step. dual_vertices and intersected are returned as
+            zero-filled placeholders. Useful when only occupancy is needed.
     """
     assert vertices.is_cuda, "mesh_to_flexible_dual_grid_cuda requires CUDA tensors"
     vertices, faces, voxel_size, grid_range = _process_mesh_to_fdg_args(
         vertices, faces, voxel_size, grid_size, aabb)
     return _C.mesh_to_flexible_dual_grid_cuda(
         vertices, faces, voxel_size, grid_range,
-        face_weight, boundary_weight, regularization_weight, timing,
+        face_weight, boundary_weight, regularization_weight, timing, return_voxel_only,
     )
 
 
@@ -128,9 +134,10 @@ def mesh_to_flexible_dual_grid(
     boundary_weight: float = 1.0,
     regularization_weight: float = 0.1,
     timing: bool = False,
+    return_voxel_only: bool = False,
 ) -> Union[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Voxelize a mesh into a sparse voxel grid using the CPU path.
+    Voxelize a mesh into a sparse voxel grid. Auto-dispatches to CUDA or CPU.
 
     Args:
         vertices (torch.Tensor): The vertices of the mesh.
@@ -144,6 +151,8 @@ def mesh_to_flexible_dual_grid(
         boundary_weight (float): The weight of the boundary term in the QEF when solving the dual vertices.
         regularization_weight (float): The weight of the regularization term in the QEF when solving the dual vertices.
         timing (bool): Whether to time the voxelization process.
+        return_voxel_only (bool): If True, return only voxel indices after the
+            intersect step (CUDA only). dual_vertices and intersected are zero-filled.
 
     Returns:
         torch.Tensor: The indices of the voxels that are occupied by the mesh.
@@ -156,7 +165,7 @@ def mesh_to_flexible_dual_grid(
     if vertices.is_cuda:
         return _C.mesh_to_flexible_dual_grid_cuda(
             vertices, faces, voxel_size, grid_range,
-            face_weight, boundary_weight, regularization_weight, timing,
+            face_weight, boundary_weight, regularization_weight, timing, return_voxel_only,
         )
     else:
         return _C.mesh_to_flexible_dual_grid_cpu(

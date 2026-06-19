@@ -602,7 +602,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
     float face_weight,
     float boundary_weight,
     float regularization_weight,
-    bool timing)
+    bool timing,
+    bool return_voxel_only)
 {
     int V = vertices.size(0);
     int F = faces.size(0);
@@ -723,6 +724,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
     }
     if (num_voxels > max_voxels) {
         throw std::runtime_error("Voxel count exceeded capacity. Increase capacity estimate.");
+    }
+
+    // Early return: only voxel indices, skip face/boundary QEF + solve
+    if (return_voxel_only) {
+        auto coords_out = d_coords.slice(0, 0, num_voxels * 3).view({(int64_t)num_voxels, 3}).to(torch::kInt32).contiguous();
+        auto empty_verts = torch::zeros({0, 3}, torch::kFloat32);
+        auto empty_inter = torch::zeros({0, 3}, torch::kBool);
+        return std::make_tuple(coords_out, empty_verts, empty_inter);
     }
 
     // Phase 2: face_qef

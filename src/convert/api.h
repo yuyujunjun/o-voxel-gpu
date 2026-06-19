@@ -46,7 +46,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
     float face_weight,
     float boundary_weight,
     float regularization_weight,
-    bool timing
+    bool timing,
+    bool return_voxel_only
 );
 
 
