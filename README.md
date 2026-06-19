@@ -118,17 +118,27 @@ o_voxel.io.write_vxz("output.vxz", vi.cpu(),
 
 ## Performance
 
-NVIDIA A100, `rec_helmet.glb` (297K vertices, 593K faces), 512³ grid:
+NVIDIA A100, 512³ grid.
+
+### `rec_helmet.glb` (297K vertices, 593K faces)
+
+This mesh has uniformly small triangles — pre-subdivision provides no additional benefit. The GPU path alone delivers the full speedup:
 
 | | CPU | CUDA (cold) | CUDA (warmed) |
 |---|---|---|---|
 | **Total** | 389ms | 26ms | 2.27ms |
 
-With pre-subdivision (large-triangle geometry, 512³):
+### Large-triangle geometry (CAD / low-poly, 512³)
 
-| No subdivide | With subdivide (2e-5) | Speedup |
-|---|---|---|
-| 78.8ms | 7.7ms | **10.3x** |
+Meshes with large faces expose warp divergence in the triangle-parallel scanline. We evaluated three approaches:
+
+| Approach | Voxelization time |
+|---|---|
+| Triangle-parallel (original) | 236ms |
+| Voxel-parallel blockface | 78.8ms |
+| Triangle-parallel + pre-subdivision | **7.7ms** |
+
+**Why voxel-parallel was abandoned:** the blockface approach processes one voxel per thread, which makes face-QEF accumulation efficient. But the initial triangle-voxel intersection still requires scanning every triangle against the grid — that step alone accounts for most of the 236ms and cannot be avoided in a voxel-parallel design. Pre-subdivision eliminates the root cause (large triangles) rather than working around it.
 
 ## Files Added vs Upstream
 
