@@ -4,11 +4,13 @@ CUDA-accelerated fork of [o-voxel](https://github.com/microsoft/TRELLIS.2) from 
 
 ## What's Different from Upstream
 
-The triangle-parallel scanline algorithm processes one triangle per CUDA thread. When a mesh contains large triangles (common in CAD, architectural models, or low-poly assets), a single thread may traverse hundreds of voxels while the rest of the warp idles — **warp divergence**. This pushes voxelization from ~30ms to hundreds of milliseconds.
+This fork adds one new function: **`subdivide_mesh_gpu`** — an optional GPU pre-subdivision step that splits large triangles before voxelization. It does not alter the voxelization algorithm itself; with or without subdivision, the final output is numerically identical.
 
-This fork adds an optional **pre-subdivision** step: `subdivide_mesh_gpu` splits large triangles via GPU longest-edge bisection **before** voxelization. With a default threshold of `2e-5` (optimal for 512³), large-triangle geometry drops from several hundred milliseconds to **under 30ms**.
+**Why it exists.** The triangle-parallel scanline algorithm processes one triangle per CUDA thread. When a mesh contains large triangles (common in CAD, architectural models, or low-poly assets), a single thread may traverse hundreds of voxels while the rest of the warp idles — **warp divergence**. This pushes voxelization from ~30ms to hundreds of milliseconds.
 
-The subdivision is external to the voxelization pipeline — callers can subdivide once and voxelize many times (e.g. animated meshes).
+`subdivide_mesh_gpu` eliminates the imbalance by splitting large triangles via GPU longest-edge bisection. After subdivision all triangles are uniformly small, and the scanline algorithm runs at full efficiency — large-triangle geometry drops from several hundred milliseconds to **under 10ms**.
+
+The subdivision is external to the voxelization pipeline — callers can subdivide once and voxelize many times (e.g. animated meshes). Default threshold is `2e-5` (optimal for 512³).
 
 ## Installation
 
@@ -138,7 +140,7 @@ Meshes with large faces expose warp divergence in the triangle-parallel scanline
 | Voxel-parallel blockface | 78.8ms |
 | Triangle-parallel + pre-subdivision | **7.7ms** |
 
-**Why voxel-parallel was abandoned:** the blockface approach processes one voxel per thread, which makes face-QEF accumulation efficient. But the initial triangle-voxel intersection still requires scanning every triangle against the grid — that step alone accounts for most of the 236ms and cannot be avoided in a voxel-parallel design. Pre-subdivision eliminates the root cause (large triangles) rather than working around it.
+**Why voxel-parallel was abandoned.** The blockface approach improves face-QEF by processing voxels in parallel, but has two fundamental problems: (1) the initial triangle-voxel intersection step is still triangle-parallel scanline — the same warp-divergence bottleneck from large triangles; (2) the face-QEF step wastes ~92% of threads on empty voxels (only ~8% of grid voxels intersect the mesh surface). Pre-subdivision eliminates the root cause rather than working around it, making the simpler triangle-parallel approach faster by an order of magnitude.
 
 ## Files Added vs Upstream
 
