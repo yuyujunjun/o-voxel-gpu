@@ -1,20 +1,14 @@
-# O-Voxel-GPU: CUDA-Accelerated Voxelization
+# O-Voxel-GPU
 
-**O-Voxel-GPU** is a CUDA-accelerated fork of the original [o-voxel](https://github.com/microsoft/TRELLIS.2) library from the [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) project. It adds a GPU implementation of `mesh_to_flexible_dual_grid`, achieving **~15x speedup** (cold) to **~170x speedup** (warmed) over the CPU path on an NVIDIA A100.
+CUDA-accelerated fork of [o-voxel](https://github.com/microsoft/TRELLIS.2) from [TRELLIS.2](https://github.com/microsoft/TRELLIS.2). `mesh_to_flexible_dual_grid` runs entirely on GPU with output **100% identical** to the CPU path (verified voxel-by-voxel on cube, sphere, and complex meshes). On `rec_helmet.glb` (297K vertices, 593K faces, 512³ grid) the GPU path achieves **~15x cold / ~170x warmed** speedup over CPU on an NVIDIA A100.
 
-## Key Features
+## What's Different from Upstream
 
-- **GPU Voxelization**: Full GPU pipeline for `mesh_to_flexible_dual_grid_cuda` — triangle-voxel intersection, face/edge QEF accumulation, and dual vertex solving all run on CUDA.
-- **Boundary Edge Detection on GPU**: Replaces the CPU `std::map` boundary edge step (~200ms) with a CUDA thrust-based sort+filter (~0.04ms).
-- **Explicit API**: `mesh_to_flexible_dual_grid_cuda` for GPU path, `mesh_to_flexible_dual_grid` retains the original CPU API.
-- **Exact Output Match**: Verified voxel-coordinate identical to CPU output across cube, sphere, and complex meshes.
-- **Mesh Pre-Subdivision**: `subdivide_mesh_gpu` eliminates warp divergence from large triangles, yielding ~10x additional speedup at 512³.
+The triangle-parallel scanline algorithm processes one triangle per CUDA thread. When a mesh contains large triangles (common in CAD, architectural models, or low-poly assets), a single thread may traverse hundreds of voxels while the rest of the warp idles — **warp divergence**. This pushes voxelization from ~30ms to hundreds of milliseconds.
 
-## Requirements
+This fork adds an optional **pre-subdivision** step: `subdivide_mesh_gpu` splits large triangles via GPU longest-edge bisection **before** voxelization. With a default threshold of `2e-5` (optimal for 512³), large-triangle geometry drops from several hundred milliseconds to **under 30ms**.
 
-- CUDA Toolkit ≥ 11.8
-- PyTorch ≥ 2.0
-- C++17 compiler (gcc ≥ 9, or equivalent)
+The subdivision is external to the voxelization pipeline — callers can subdivide once and voxelize many times (e.g. animated meshes).
 
 ## Installation
 
@@ -24,139 +18,129 @@ cd o-voxel-gpu
 pip install . --no-build-isolation
 ```
 
-To build in an environment with limited RAM:
+To build with limited RAM: `MAX_JOBS=2 pip install . --no-build-isolation`.
 
-```bash
-MAX_JOBS=2 pip install . --no-build-isolation
-```
+Requirements: CUDA Toolkit ≥ 11.8, PyTorch ≥ 2.0, C++17 compiler.
 
-To force a CUDA (non-ROCm) build when both toolchains are present:
+## API
 
-```bash
-BUILD_TARGET=cuda pip install . --no-build-isolation
-```
+### mesh_to_flexible_dual_grid
 
-## Quick Start
-
-### GPU Voxelization
+Auto-dispatches to CUDA or CPU based on tensor device.
 
 ```python
-import torch
-import trimesh
-import o_voxel
-
-# Load mesh
-mesh = trimesh.load("rec_helmet.glb", process=False)
-vertices = torch.from_numpy(mesh.vertices).float().cuda()
-faces = torch.from_numpy(mesh.faces).long().cuda()
-
-# GPU voxelization — explicit _cuda suffix
-voxel_indices, dual_vertices, intersected = o_voxel.convert.mesh_to_flexible_dual_grid_cuda(
-    vertices=vertices,
-    faces=faces,
-    grid_size=512,
-    aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-    face_weight=1.0,
-    boundary_weight=0.2,
-    regularization_weight=1e-2,
-)
+o_voxel.convert.mesh_to_flexible_dual_grid(
+    vertices: torch.Tensor,       # (V, 3) float32
+    faces: torch.Tensor,          # (F, 3) int32
+    voxel_size: float | [3] = None,  # one of voxel_size or grid_size required
+    grid_size: int | [3] = None,
+    aabb: (2, 3) float = None,    # auto-computed if None
+    face_weight: float = 1.0,
+    boundary_weight: float = 1.0,
+    regularization_weight: float = 0.1,
+    timing: bool = False,
+) -> tuple[voxel_indices (N,3) int32, dual_vertices (N,3) float32, intersected (N,3) bool]
 ```
 
-### Pre-Subdivision for Large Triangles
+### mesh_to_flexible_dual_grid_cuda
 
-The triangle-parallel scanline algorithm processes one triangle per CUDA thread. Large triangles dominate runtime through **warp divergence** — a single thread traverses hundreds of voxels while the rest of the warp idles. The voxel-parallel alternative wastes ~92% of threads on empty voxels.
+Explicit GPU path. Tensors must be on CUDA. Same signature as above.
 
-`subdivide_mesh_gpu` solves this by splitting large triangles **before** voxelization via longest-edge bisection:
+```python
+o_voxel.convert.mesh_to_flexible_dual_grid_cuda(
+    vertices, faces, voxel_size=..., grid_size=..., ...
+) -> tuple[voxel_indices, dual_vertices, intersected]
+```
+
+### subdivide_mesh_gpu
+
+Pre-subdivide large triangles for efficient GPU voxelization.
 
 ```python
 from o_voxel.convert.mesh_subdivide import subdivide_mesh_gpu
 
-# Subdivide triangles larger than 2e-5 (optimal for 512^3 grid)
-vertices, faces = subdivide_mesh_gpu(vertices, faces, area_threshold=2e-5)
-
-# Then voxelize as usual — ~10x faster at 512^3, ~15x at 1024^3
-voxel_indices, dual_vertices, intersected = o_voxel.convert.mesh_to_flexible_dual_grid_cuda(
-    vertices=vertices, faces=faces, grid_size=512, ...
-)
+subdivide_mesh_gpu(
+    verts: torch.Tensor,              # (V, 3) float32, GPU
+    faces: torch.Tensor,              # (F, 3) int64, GPU
+    area_threshold: float = 2e-5,     # optimal for 512³; use 5e-6 for 1024³
+    max_iters: int = 12,
+) -> tuple[new_verts (V',3) float32, new_faces (F',3) int64]
 ```
 
-Key design decisions:
-- **External to the pipeline**: callers can subdivide once and voxelize many times (e.g. animated meshes).
-- **Default threshold `2e-5`**: balances subdivision overhead against voxelization speedup for 512^3 grids. Use `5e-6` for 1024^3.
-- **Threshold formula**: `area_threshold ≈ 5 / grid_size²` for a target grid resolution.
+Threshold formula: `area_threshold ≈ 5 / grid_size²`.
 
-### Save VXZ
+### flexible_dual_grid_to_mesh
+
+Reconstruct a triangle mesh from voxel grid + dual vertices.
 
 ```python
-vid = o_voxel.serialize.encode_seq(voxel_indices)
-mapping = torch.argsort(vid)
-voxel_indices = voxel_indices[mapping]
-dual_vertices = dual_vertices[mapping]
-intersected = intersected[mapping]
-
-dual_vertices = torch.clamp((dual_vertices * grid_size - voxel_indices) * 255, 0, 255).byte()
-intersected = (intersected[:, 0] + 2 * intersected[:, 1] + 4 * intersected[:, 2]).byte().unsqueeze(1)
-
-o_voxel.io.write_vxz("output.vxz", voxel_indices.cpu(),
-    {"vertices": dual_vertices.cpu(), "intersected": intersected.cpu()})
+o_voxel.convert.flexible_dual_grid_to_mesh(
+    coords: torch.Tensor,            # (N, 3) int
+    dual_vertices: torch.Tensor,     # (N, 3) float
+    intersected_flag: torch.Tensor,  # (N, 3) bool
+    split_weight: torch.Tensor | None,
+    aabb: (2, 3) float,
+    voxel_size: ... = None,
+    grid_size: ... = None,
+    train: bool = False,
+) -> tuple[vertices (M,3) float, faces (K,3) int]
 ```
 
-### Reconstruct Mesh from VXZ
+## Quick Start
 
 ```python
-coords, attr = o_voxel.io.read_vxz("output.vxz")
-dual_vertices = attr["vertices"].float().cuda() / 255.0
-intersected = torch.cat([
-    attr["intersected"] % 2,
-    attr["intersected"] // 2 % 2,
-    attr["intersected"] // 4 % 2,
-], dim=-1).bool().cuda()
+import torch, trimesh, o_voxel
+from o_voxel.convert.mesh_subdivide import subdivide_mesh_gpu
 
-verts, faces = o_voxel.convert.flexible_dual_grid_to_mesh(
-    coords.cuda(), dual_vertices, intersected,
-    split_weight=None,
-    grid_size=512,
+# Load and upload mesh
+mesh = trimesh.load("rec_helmet.glb", process=False)
+v = torch.from_numpy(mesh.vertices).float().cuda()
+f = torch.from_numpy(mesh.faces).long().cuda()
+
+# Optional: subdivide large triangles (~10x faster at 512³)
+v, f = subdivide_mesh_gpu(v, f)
+
+# Voxelize
+vi, dv, inter = o_voxel.convert.mesh_to_flexible_dual_grid_cuda(
+    vertices=v, faces=f.int(), grid_size=512,
     aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
 )
+
+# Save VXZ
+vid = o_voxel.serialize.encode_seq(vi)
+m = torch.argsort(vid)
+vi, dv, inter = vi[m], dv[m], inter[m]
+dv = torch.clamp((dv * 512 - vi) * 255, 0, 255).byte()
+inter = (inter[:, 0] + 2 * inter[:, 1] + 4 * inter[:, 2]).byte().unsqueeze(1)
+o_voxel.io.write_vxz("output.vxz", vi.cpu(),
+    {"vertices": dv.cpu(), "intersected": inter.cpu()})
 ```
 
-### Full Pipeline Verification
+## Performance
 
-The `verify_pipeline.py` script runs end-to-end: GLB → GPU voxelization → VXZ → TRELLIS latent encode → decode → GLB. Requires `trellis2`.
+NVIDIA A100, `rec_helmet.glb` (297K vertices, 593K faces), 512³ grid:
 
-```bash
-python verify_pipeline.py --input rec_helmet.glb --output decoded.glb
-```
+| | CPU | CUDA (cold) | CUDA (warmed) |
+|---|---|---|---|
+| **Total** | 389ms | 26ms | 2.27ms |
 
-## Relationship to Upstream
+With pre-subdivision (large-triangle geometry, 512³):
 
-This fork is derived from [microsoft/TRELLIS.2](https://github.com/microsoft/TRELLIS.2). The GPU implementation adds:
+| No subdivide | With subdivide (2e-5) | Speedup |
+|---|---|---|
+| 78.8ms | 7.7ms | **10.3x** |
+
+## Files Added vs Upstream
 
 | Component | File |
 |---|---|
-| CUDA device functions (7 kernels) | `src/convert/flexible_dual_grid.cuh` |
-| Host-side launcher + kernels | `src/convert/flexible_dual_grid_cuda.cu` |
+| CUDA device functions | `src/convert/flexible_dual_grid.cuh` |
+| CUDA kernels + host launcher | `src/convert/flexible_dual_grid_cuda.cu` |
 | Python GPU entry point | `o_voxel/convert/flexible_dual_grid.py` |
 | Mesh pre-subdivision | `o_voxel/convert/mesh_subdivide.py` |
 | Build integration | `setup.py` |
 
-All other modules (I/O, serialization, rasterization, postprocessing) are unchanged from upstream.
-
-## Performance
-
-Measured on an NVIDIA A100 with `rec_helmet.glb` (297K vertices, 593K faces, 512³ grid):
-
-| | CPU | CUDA (cold) | CUDA (warmed) |
-|---|---|---|---|
-| **Total** | **389ms** | **26ms** | **2.27ms** |
-
-With pre-subdivision at 512³:
-
-| | No subdivide | With subdivide (2e-5) | Speedup |
-|---|---|---|---|
-| **Voxelization** | 78.8ms | 7.7ms | **10.3x** |
-
-Warmed CUDA path achieves **170x** speedup over CPU.
+All other modules (I/O, serialization, rasterization) are unchanged from upstream.
 
 ## License
 
