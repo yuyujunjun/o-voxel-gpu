@@ -140,7 +140,7 @@ Meshes with large faces expose warp divergence in the triangle-parallel scanline
 | Voxel-parallel blockface | 78.8ms |
 | Triangle-parallel + pre-subdivision | **7.7ms** |
 
-**Why voxel-parallel was abandoned.** The blockface approach improves face-QEF by processing voxels in parallel, but has two fundamental problems: (1) the initial triangle-voxel intersection step is still triangle-parallel scanline — the same warp-divergence bottleneck from large triangles; (2) the face-QEF step wastes ~92% of threads on empty voxels (only ~8% of grid voxels intersect the mesh surface). Pre-subdivision eliminates the root cause rather than working around it, making the simpler triangle-parallel approach faster by an order of magnitude.
+**Why voxel-parallel was abandoned.** The blockface approach accelerates face-QEF by processing voxels in parallel, but the initial triangle-voxel intersection step is still triangle-parallel scanline — the same warp-divergence bottleneck from large triangles. Pre-subdivision eliminates the root cause rather than working around it, making the simpler triangle-parallel approach faster by an order of magnitude.
 
 ## Files Added vs Upstream
 
