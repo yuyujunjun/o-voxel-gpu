@@ -153,10 +153,16 @@ def mesh_to_flexible_dual_grid(
     """
     vertices, faces, voxel_size, grid_range = _process_mesh_to_fdg_args(
         vertices, faces, voxel_size, grid_size, aabb)
-    return _C.mesh_to_flexible_dual_grid_cpu(
-        vertices, faces, voxel_size, grid_range,
-        face_weight, boundary_weight, regularization_weight, timing,
-    )
+    if vertices.is_cuda:
+        return _C.mesh_to_flexible_dual_grid_cuda(
+            vertices, faces, voxel_size, grid_range,
+            face_weight, boundary_weight, regularization_weight, timing,
+        )
+    else:
+        return _C.mesh_to_flexible_dual_grid_cpu(
+            vertices, faces, voxel_size, grid_range,
+            face_weight, boundary_weight, regularization_weight, timing,
+        )
 
 
 def flexible_dual_grid_to_mesh(
