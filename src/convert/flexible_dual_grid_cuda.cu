@@ -632,10 +632,32 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> mesh_to_flexible_dual_gr
     int gmax_y = gr_cpu[1][1].item<int>();
     int gmax_z = gr_cpu[1][2].item<int>();
 
-    // Capacity estimation
+    // Capacity estimation — use surface area / voxel_area
     int64_t total_cells = (int64_t)(gmax_x - gmin_x) * (gmax_y - gmin_y) * (gmax_z - gmin_z);
-    int64_t est_voxels = total_cells;
-    if (est_voxels > (int64_t)F * 64) est_voxels = (int64_t)F * 64;
+    // Compute surface area from the mesh on GPU
+    auto face_idx = faces_cuda.to(torch::kLong);
+    auto v0 = vertices_cuda.index_select(0, face_idx.select(1, 0));
+    auto v1 = vertices_cuda.index_select(0, face_idx.select(1, 1));
+    auto v2 = vertices_cuda.index_select(0, face_idx.select(1, 2));
+    auto e0 = v1 - v0;
+    auto e1 = v2 - v0;
+    auto cx = e0.select(1, 1) * e1.select(1, 2) - e0.select(1, 2) * e1.select(1, 1);
+    auto cy = e0.select(1, 2) * e1.select(1, 0) - e0.select(1, 0) * e1.select(1, 2);
+    auto cz = e0.select(1, 0) * e1.select(1, 1) - e0.select(1, 1) * e1.select(1, 0);
+    auto triangle_areas = 0.5f * torch::sqrt(cx * cx + cy * cy + cz * cz);
+    float surface_area = triangle_areas.sum().item<float>();
+    // est_voxels = max(area-based, face-count-based), capped at total_cells
+    // area-based: surface_area / voxel_area * orientation_factor (~2.0 for headroom)
+    // face-count-based: num_faces * 64 — protects against many-small-face meshes
+    //   where area-based severely underestimates (each face spans multiple voxels
+    //   via 3-axis scanline rasterization regardless of area)
+    int64_t num_faces = faces_cuda.size(0);
+    float voxel_area = vs_x * vs_x;
+    int64_t est_by_area = (int64_t)(surface_area / voxel_area * 2.0f);
+    int64_t est_by_faces = (int64_t)num_faces * 64;
+    int64_t est_voxels = est_by_area;
+    if (est_by_faces > est_voxels) est_voxels = est_by_faces;
+    if (est_voxels > total_cells) est_voxels = total_cells;
     if (est_voxels < 65536) est_voxels = 65536;
     int64_t capacity = est_voxels * 2;
     int64_t max_voxels = est_voxels;
